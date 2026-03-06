@@ -31,7 +31,7 @@ services:
   sql-bot:
     build: 
       context: .
-      dockerfile: ./sql-bot/Dockerfile
+      dockerfile: ./services/sql-bot/Dockerfile
     networks:
       - risknexus_net
     environment:

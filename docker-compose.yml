@@ -1,0 +1,82 @@
+version: "3.8"
+
+# Root compose for RiskNexus PoC
+# - chroamdb service with persistent volume
+# - placeholder FastAPI services for orchestrator + bots
+# - all services share a custom network
+
+services:
+  chromadb:
+    image: chromadb/chroma:latest
+    volumes:
+      - ./chroma_data:/chroma/chroma   # persistence for vectors
+    ports:
+      - "8000:8000"
+    networks:
+      - risknexus_net
+
+  orchestrator:
+    # build context can be updated once code is available
+    build: ./services/orchestrator
+    # expose a port for local testing if needed
+    ports:
+      - "8001:8000"
+    networks:
+      - risknexus_net
+    environment:
+      # this value is consumed by the HTTP client in the orchestrator
+      # to mirror the 1‑hour timeout defined in the spec
+      - WORKER_REQUEST_TIMEOUT=3600
+
+  sql-bot:
+    build: ./services/sql-bot
+    networks:
+      - risknexus_net
+    environment:
+      - WORKER_REQUEST_TIMEOUT=3600
+
+  graph-bot:
+    build: ./services/graph-bot
+    networks:
+      - risknexus_net
+    environment:
+      - WORKER_REQUEST_TIMEOUT=3600
+
+  search-bot:
+    build: ./services/search-bot
+    networks:
+      - risknexus_net
+    environment:
+      - WORKER_REQUEST_TIMEOUT=3600
+
+  doc-bot:
+    build: ./services/doc-bot
+    networks:
+      - risknexus_net
+    environment:
+      - WORKER_REQUEST_TIMEOUT=3600
+
+  decision-bot:
+    build: ./services/decision-bot
+    networks:
+      - risknexus_net
+    environment:
+      - WORKER_REQUEST_TIMEOUT=3600
+
+  calc-bot:
+    build: ./services/calc-bot
+    networks:
+      - risknexus_net
+    environment:
+      - WORKER_REQUEST_TIMEOUT=3600
+
+  embedding-bot:
+    build: ./services/embedding-bot
+    networks:
+      - risknexus_net
+    environment:
+      - WORKER_REQUEST_TIMEOUT=3600
+
+networks:
+  risknexus_net:
+    driver: bridge

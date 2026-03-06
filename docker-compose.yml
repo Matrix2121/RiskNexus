@@ -29,32 +29,48 @@ services:
       - WORKER_REQUEST_TIMEOUT=3600
 
   sql-bot:
-    build: ./services/sql-bot
+    build: 
+      context: .
+      dockerfile: ./sql-bot/Dockerfile
     networks:
       - risknexus_net
     environment:
       - WORKER_REQUEST_TIMEOUT=3600
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - CHROMA_URL=http://chromadb:8000
 
   graph-bot:
-    build: ./services/graph-bot
+    build: 
+      context: .
+      dockerfile: ./services/graph-bot/Dockerfile
     networks:
       - risknexus_net
     environment:
       - WORKER_REQUEST_TIMEOUT=3600
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - CHROMA_URL=http://chromadb:8000
 
   search-bot:
-    build: ./services/search-bot
+    build: 
+      context: .
+      dockerfile: ./services/search-bot/Dockerfile
     networks:
       - risknexus_net
     environment:
       - WORKER_REQUEST_TIMEOUT=3600
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - CHROMA_URL=http://chromadb:8000
 
   doc-bot:
-    build: ./services/doc-bot
+    build: 
+      context: .
+      dockerfile: ./services/doc-bot/Dockerfile
     networks:
       - risknexus_net
     environment:
       - WORKER_REQUEST_TIMEOUT=3600
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - CHROMA_URL=http://chromadb:8000
 
   decision-bot:
     build: ./services/decision-bot
@@ -71,11 +87,15 @@ services:
       - WORKER_REQUEST_TIMEOUT=3600
 
   embedding-bot:
-    build: ./services/embedding-bot
+    build: 
+      context: .
+      dockerfile: ./services/embedding-bot/Dockerfile
     networks:
       - risknexus_net
     environment:
       - WORKER_REQUEST_TIMEOUT=3600
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - CHROMA_URL=http://chromadb:8000
 
 networks:
   risknexus_net:

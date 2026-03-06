@@ -40,17 +40,40 @@ async def router(state: AgentState) -> AgentState:
 
 
 # --- Parallel executor node ------------------------------------------------
+# --- Parallel executor node ------------------------------------------------
 async def execute_workers(state: AgentState) -> AgentState:
-    workers: List[str] = state.get("required_workers", []) or []
+    raw_workers: List[str] = state.get("required_workers", []) or []
     query = state.get("query", "")
     ctx = state.get("user_context", {}) or {}
 
+    # 1. Define the whitelist of valid service hostnames
+    VALID_WORKERS = {
+        "sql-bot", 
+        "graph-bot", 
+        "search-bot", 
+        "doc-bot", 
+        "decision-bot", 
+        "calc-bot", 
+        "embedding-bot"
+    }
+
+    # 2. Sanitize and filter the LLM's output
+    sanitized_workers = set()
+    for w in raw_workers:
+        # Replace accidental underscores with dashes
+        clean_name = str(w).replace("_", "-").strip().lower()
+        if clean_name in VALID_WORKERS:
+            sanitized_workers.add(clean_name)
+
     async with httpx.AsyncClient(timeout=3600.0) as hc:
         tasks = []
-        for w in workers:
+        # 3. Use the sanitized list to build the URLs
+        for w in sanitized_workers:
             url = f"http://{w}:8000/query"
             req_obj = WorkerRequest(query=query, context=ctx)
             tasks.append(hc.post(url, json=req_obj.model_dump()))
+        
+        # Execute all valid tasks concurrently
         responses = await asyncio.gather(*tasks, return_exceptions=True)
 
     results: List[Dict[str, Any]] = []
@@ -65,7 +88,6 @@ async def execute_workers(state: AgentState) -> AgentState:
 
     state["worker_responses"] = results
     return state
-
 
 # --- Synthesis node --------------------------------------------------------
 async def synthesize(state: AgentState) -> AgentState:

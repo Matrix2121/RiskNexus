@@ -9,24 +9,28 @@ services:
   chromadb:
     image: chromadb/chroma:latest
     volumes:
-      - ./chroma_data:/chroma/chroma   # persistence for vectors
+      - ./chroma_data:/chroma/chroma
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
     networks:
       - risknexus_net
 
   orchestrator:
-    # build context can be updated once code is available
-    build: ./services/orchestrator
-    # expose a port for local testing if needed
+    build: 
+      context: .
+      dockerfile: ./services/orchestrator/Dockerfile
     ports:
       - "8001:8000"
     networks:
       - risknexus_net
     environment:
-      # this value is consumed by the HTTP client in the orchestrator
-      # to mirror the 1‑hour timeout defined in the spec
       - WORKER_REQUEST_TIMEOUT=3600
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
 
   sql-bot:
     build: 
@@ -72,24 +76,27 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - CHROMA_URL=http://chromadb:8000
 
-  decision-bot:
-    build: ./services/decision-bot
-    networks:
-      - risknexus_net
-    environment:
-      - WORKER_REQUEST_TIMEOUT=3600
+  #decision-bot:
+  #  build: ./services/decision-bot
+  #  networks:
+  #    - risknexus_net
+  #  environment:
+  #    - WORKER_REQUEST_TIMEOUT=3600
 
-  calc-bot:
-    build: ./services/calc-bot
-    networks:
-      - risknexus_net
-    environment:
-      - WORKER_REQUEST_TIMEOUT=3600
+  #calc-bot:
+  #  build: ./services/calc-bot
+  #  networks:
+  #    - risknexus_net
+  #  environment:
+  #    - WORKER_REQUEST_TIMEOUT=3600
 
   embedding-bot:
     build: 
       context: .
       dockerfile: ./services/embedding-bot/Dockerfile
+    depends_on:
+      chromadb:
+        condition: service_healthy
     networks:
       - risknexus_net
     environment:

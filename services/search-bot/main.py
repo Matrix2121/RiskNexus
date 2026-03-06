@@ -6,7 +6,7 @@ import asyncio
 from fastapi import FastAPI, HTTPException
 
 import genai
-from duckduckgo_search import DDGS
+from duckduckgo_search import AsyncDDGS
 
 from shared.models import WorkerRequest, WorkerResponse
 
@@ -30,7 +30,7 @@ async def _formulate_query(user_query: str) -> str:
 async def _search_web(query: str) -> List[dict]:
     # run DDGS search asynchronously
     results: List[dict] = []
-    async for r in DDGS().text(query, max_results=3):
+    async for r in AsyncDDGS().text(query, max_results=3):
         results.append(r)
     return results
 

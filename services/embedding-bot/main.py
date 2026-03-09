@@ -9,14 +9,25 @@ import chromadb
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-import genai
+import google.genai as genai
 
 # Models
+
+
 class TextPayload(BaseModel):
     text: str
 
+
 app = FastAPI(title="Embedding Bot")
 client = genai.Client()
+
+# optional LangSmith tracing
+try:
+    from langchain import LangSmithTracer
+    tracer = LangSmithTracer()
+    tracer.service = "embedding-bot"
+except ImportError:
+    tracer = None
 
 # Initialize ChromaDB HTTP Client
 chroma_client = chromadb.HttpClient(host="chromadb", port=8000)
@@ -32,6 +43,7 @@ REQUIRED_COLLECTIONS = [
     "schema_graph_entities"
 ]
 
+
 @app.on_event("startup")
 async def initialize_collections():
     """Ensures all required collections exist on startup."""
@@ -42,31 +54,46 @@ async def initialize_collections():
         except Exception as e:
             print(f"Failed to initialize collection {collection_name}: {e}")
 
+
 async def _generate_metadata(text: str) -> Dict[str, Any]:
     prompt = (
         "Given the following text, return a JSON object with two keys: "
         "`summary` (a brief natural-language summary) and `tags` (a list of relevant short keywords). "
         "The output must be valid JSON and nothing else.\nText:\n" + text
     )
-    response = client.responses.create(model="gemini-2.5-flash-lite", input=prompt)
-    raw = response.output_text if hasattr(response, "output_text") else ""
+    if tracer is not None:
+        with tracer.as_default():
+            response = client.models.generate_content(
+                model="gemini-2.5-flash-lite", contents=prompt)
+    else:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-lite", contents=prompt)
+    raw = response.text or ""
     try:
         return json.loads(raw.strip().strip("```json").strip("```"))
     except Exception:
         return {"summary": "Extraction failed", "tags": []}
 
+
 async def _embed(text: str) -> list[float]:
-    emb = client.embeddings.create(model="gemini-embedding-001", input=text)
+    if tracer is not None:
+        with tracer.as_default():
+            emb = client.embeddings.create(
+                model="gemini-embedding-001", input=text)
+    else:
+        emb = client.embeddings.create(
+            model="gemini-embedding-001", input=text)
     return emb.data[0].embedding
+
 
 @app.post("/embed/{collection_name}")
 async def embed_generic(collection_name: str, payload: TextPayload):
     if collection_name not in REQUIRED_COLLECTIONS:
         raise HTTPException(status_code=404, detail="Unknown collection")
-    
+
     metadata = await _generate_metadata(payload.text)
     vector = await _embed(payload.text)
-    
+
     # Use client to add data
     collection = chroma_client.get_collection(name=collection_name)
     collection.add(

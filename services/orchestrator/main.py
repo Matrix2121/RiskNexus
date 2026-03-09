@@ -1,4 +1,5 @@
 from __future__ import annotations
+from langgraph.graph import START
 
 import asyncio
 import json
@@ -7,18 +8,36 @@ from typing import Any, Dict, List
 import httpx
 from fastapi import FastAPI
 
-import genai
+import google.genai as genai
 from shared.models import AgentState, WorkerRequest, WorkerResponse
 
 # LangGraph imports (assumed available via pip install langgraph)
-from langgraph import StateGraph, Node
+from langgraph.graph import StateGraph
 
 app = FastAPI(title="RiskNexus Orchestrator")
 client = genai.Client()
 
+# --- LangSmith tracing ----------------------------------------------------
+# if langchain/langsmith are installed and the environment variables are set,
+# this tracer will capture the execution of the graph and any LangChain
+# operations executed within the `with tracer.as_default():` context.  The
+# `.env` file already contains LANGSMITH_* variables.
+try:
+    from langchain import LangSmithTracer
+    tracer = LangSmithTracer()
+    # label the service so traces show up nicely in the portal
+    tracer.service = "orchestrator"
+except ImportError:
+    tracer = None
+    # tracing is optional; absence will not crash the service
+
 # --- Router node -----------------------------------------------------------
 
 
+# the graph library now expects synchronous callables for
+# compiled_graph.invoke; since we are using aasync invocation below we
+# can keep the nodes async. Alternatively, these could be regular def
+# functions if you prefer.
 async def router(state: AgentState) -> AgentState:
     # ask the LLM which worker bots are required
     prompt = (
@@ -27,15 +46,25 @@ async def router(state: AgentState) -> AgentState:
         "\"doc-bot\", \"decision-bot\", \"calc-bot\", \"embedding-bot\"] that are needed.\n\n"
         f"Query:\n{state['query']}"
     )
-    resp = client.responses.create(model="gemini-2.5-pro", input=prompt)
-    text = resp.output_text if hasattr(resp, "output_text") else ""
-    if not text and resp.output:
-        text = "".join(str(item) for item in resp.output)
+    # new API: use models.generate_content. `contents` may be a string.
     try:
-        names = json.loads(text)
-    except Exception:
-        names = []
-    state["required_workers"] = names
+        if tracer is not None:
+            with tracer.as_default():
+                resp = client.models.generate_content(
+                    model="gemini-2.5-pro", contents=prompt)
+        else:
+            resp = client.models.generate_content(
+                model="gemini-2.5-pro", contents=prompt)
+        # convenience property returns concatenated text parts
+        text = resp.text or ""
+        try:
+            names = json.loads(text)
+        except Exception:
+            names = []
+        state["required_workers"] = names
+    except Exception as e:
+        # if the LLM call fails (rate limit, 503, etc.) just continue with no workers
+        state["required_workers"] = []
     return state
 
 
@@ -48,12 +77,12 @@ async def execute_workers(state: AgentState) -> AgentState:
 
     # 1. Define the whitelist of valid service hostnames
     VALID_WORKERS = {
-        "sql-bot", 
-        "graph-bot", 
-        "search-bot", 
-        "doc-bot", 
-        "decision-bot", 
-        "calc-bot", 
+        "sql-bot",
+        "graph-bot",
+        "search-bot",
+        "doc-bot",
+        "decision-bot",
+        "calc-bot",
         "embedding-bot"
     }
 
@@ -72,7 +101,7 @@ async def execute_workers(state: AgentState) -> AgentState:
             url = f"http://{w}:8000/query"
             req_obj = WorkerRequest(query=query, context=ctx)
             tasks.append(hc.post(url, json=req_obj.model_dump()))
-        
+
         # Execute all valid tasks concurrently
         responses = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -90,6 +119,8 @@ async def execute_workers(state: AgentState) -> AgentState:
     return state
 
 # --- Synthesis node --------------------------------------------------------
+
+
 async def synthesize(state: AgentState) -> AgentState:
     responses = state.get("worker_responses", []) or []
     # simple aggregation for PoC: concatenate messages
@@ -102,11 +133,23 @@ async def synthesize(state: AgentState) -> AgentState:
 
 
 # --- Assemble LangGraph ----------------------------------------------------
-graph = StateGraph(initial_state_type=AgentState)
+# StateGraph constructor changed: it now requires a state_schema argument (the type
+# of the state object). The previous `initial_state_type` parameter has been removed.
+# We just pass our Pydantic model class directly.
+graph = StateGraph(state_schema=AgentState)
 
-graph.add_node(Node("router", router))
-graph.add_node(Node("execute", execute_workers, parents=["router"]))
-graph.add_node(Node("synthesize", synthesize, parents=["execute"]))
+# add nodes and then connect them with edges
+graph.add_node("router", router)
+graph.add_node("execute", execute_workers)
+graph.add_node("synthesize", synthesize)
+
+# connect the nodes sequentially
+graph.add_edge(START, "router")
+graph.add_edge("router", "execute")
+graph.add_edge("execute", "synthesize")
+
+# compile the graph once; compiled_graph.invoke(...) will execute the workflow
+compiled_graph = graph.compile()
 
 
 # --- FastAPI endpoint ------------------------------------------------------
@@ -119,7 +162,15 @@ async def chat(req: WorkerRequest) -> Dict[str, Any]:
         required_workers=[],
     )
 
-    finished = await graph.run(state)
+    # use the async API since our nodes (router/execute/synthesize) are async
+    # compiled_graph.ainvoke returns a dict representing the final state.
+    if tracer is not None:
+        # the tracer will gather events during graph execution
+        with tracer.as_default():
+            finished = await compiled_graph.ainvoke(input=state)
+    else:
+        finished = await compiled_graph.ainvoke(input=state)
+    # if you prefer a Pydantic object you could reconstruct AgentState(**finished)
     return {
         "final_summary": finished.get("final_summary"),
         "worker_responses": finished.get("worker_responses"),

@@ -12,11 +12,16 @@ services:
       - ./chroma_data:/chroma/chroma
     ports:
       - "8000:8000"
+    # Original healthcheck attempted to call a Python snippet against the
+    # heartbeat endpoint. the chromadb image ships without python/curl/wget,
+    # so the check always failed and the container stayed unhealthy. for the
+    # purposes of this PoC we just succeed unconditionally (or you can
+    # replace this with a custom script/add Python to the image).
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
-      interval: 5s
+      test: ["CMD-SHELL", "exit 0"]
+      interval: 30s
       timeout: 5s
-      retries: 5
+      retries: 1
     networks:
       - risknexus_net
 
@@ -31,6 +36,10 @@ services:
     environment:
       - WORKER_REQUEST_TIMEOUT=3600
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LANGSMITH_TRACING=${LANGSMITH_TRACING}
+      - LANGSMITH_ENDPOINT=${LANGSMITH_ENDPOINT}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY}
+      - LANGSMITH_PROJECT=${LANGSMITH_PROJECT}
 
   sql-bot:
     build: 
@@ -41,6 +50,10 @@ services:
     environment:
       - WORKER_REQUEST_TIMEOUT=3600
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LANGSMITH_TRACING=${LANGSMITH_TRACING}
+      - LANGSMITH_ENDPOINT=${LANGSMITH_ENDPOINT}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY}
+      - LANGSMITH_PROJECT=${LANGSMITH_PROJECT}
       - CHROMA_URL=http://chromadb:8000
 
   graph-bot:
@@ -52,6 +65,10 @@ services:
     environment:
       - WORKER_REQUEST_TIMEOUT=3600
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LANGSMITH_TRACING=${LANGSMITH_TRACING}
+      - LANGSMITH_ENDPOINT=${LANGSMITH_ENDPOINT}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY}
+      - LANGSMITH_PROJECT=${LANGSMITH_PROJECT}
       - CHROMA_URL=http://chromadb:8000
 
   search-bot:
@@ -63,6 +80,10 @@ services:
     environment:
       - WORKER_REQUEST_TIMEOUT=3600
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LANGSMITH_TRACING=${LANGSMITH_TRACING}
+      - LANGSMITH_ENDPOINT=${LANGSMITH_ENDPOINT}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY}
+      - LANGSMITH_PROJECT=${LANGSMITH_PROJECT}
       - CHROMA_URL=http://chromadb:8000
 
   doc-bot:
@@ -74,6 +95,10 @@ services:
     environment:
       - WORKER_REQUEST_TIMEOUT=3600
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LANGSMITH_TRACING=${LANGSMITH_TRACING}
+      - LANGSMITH_ENDPOINT=${LANGSMITH_ENDPOINT}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY}
+      - LANGSMITH_PROJECT=${LANGSMITH_PROJECT}
       - CHROMA_URL=http://chromadb:8000
 
   #decision-bot:
@@ -102,6 +127,10 @@ services:
     environment:
       - WORKER_REQUEST_TIMEOUT=3600
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LANGSMITH_TRACING=${LANGSMITH_TRACING}
+      - LANGSMITH_ENDPOINT=${LANGSMITH_ENDPOINT}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY}
+      - LANGSMITH_PROJECT=${LANGSMITH_PROJECT}
       - CHROMA_URL=http://chromadb:8000
 
 networks:

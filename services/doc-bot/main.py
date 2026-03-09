@@ -6,7 +6,7 @@ from typing import List, Dict, Any
 import chromadb
 from fastapi import FastAPI, HTTPException
 
-import genai
+import google.genai as genai
 from shared.models import WorkerRequest, WorkerResponse
 
 # Initialize the official ChromaDB HTTP Client
@@ -16,12 +16,21 @@ chroma_client = chromadb.HttpClient(host="chromadb", port=8000)
 client = genai.Client()
 app = FastAPI(title="Documentation Bot")
 
+# optional LangSmith tracing
+try:
+    from langchain import LangSmithTracer
+    tracer = LangSmithTracer()
+    tracer.service = "doc-bot"
+except ImportError:
+    tracer = None
+
+
 async def _search_docs(query: str) -> Dict[str, Any]:
     """Uses the official client to query the collection by name."""
     try:
         # Step 1: Get the collection object (Client handles UUID lookup automatically)
         collection = chroma_client.get_collection(name="docs_regulations")
-        
+
         # Step 2: Perform the semantic search
         results = collection.query(
             query_texts=[query],
@@ -30,12 +39,14 @@ async def _search_docs(query: str) -> Dict[str, Any]:
         )
         return results
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"ChromaDB Query Failed: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"ChromaDB Query Failed: {str(e)}")
+
 
 async def _answer_from_chunks(results: Dict[str, Any], user_query: str) -> str:
     # results['documents'] is a list of lists; we take the first list [0]
     texts = results.get("documents", [[]])[0]
-    
+
     if not texts:
         return "I don't know."
 
@@ -44,23 +55,30 @@ async def _answer_from_chunks(results: Dict[str, Any], user_query: str) -> str:
         "If the answer is not contained in the chunks, say 'I don't know'.\n\n" +
         "\n---\n".join(texts) + "\n\nQuestion:\n" + user_query
     )
-    
-    response = client.responses.create(model="gemini-2.5-flash", input=prompt)
-    answer = response.output_text if hasattr(response, "output_text") else ""
+
+    if tracer is not None:
+        with tracer.as_default():
+            response = client.models.generate_content(
+                model="gemini-2.5-flash", contents=prompt)
+    else:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash", contents=prompt)
+    answer = response.text or ""
     return answer.strip()
+
 
 @app.post("/query", response_model=WorkerResponse)
 async def handle_query(req: WorkerRequest):
     # Step 1: Search ChromaDB using the new client logic
     results = await _search_docs(req.query)
-    
+
     # Check if we actually got documents back
     if not results.get("documents") or not results["documents"][0]:
         return WorkerResponse(status="SUCCESS", data={"answer": ""}, citations=[], message="no relevant chunks")
 
     # Step 2: Generate answer
     answer = await _answer_from_chunks(results, req.query)
-    
+
     # Step 3: Build citations from the structured metadata returned by the client
     citations = []
     # metadatas is also a list of lists
@@ -70,9 +88,9 @@ async def handle_query(req: WorkerRequest):
         citations.append(f"{file} (Page {page})")
 
     return WorkerResponse(
-        status="SUCCESS", 
-        data={"answer": answer}, 
-        citations=citations, 
+        status="SUCCESS",
+        data={"answer": answer},
+        citations=citations,
         message="Generated response from internal documentation."
     )
 

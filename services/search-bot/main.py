@@ -5,13 +5,21 @@ import asyncio
 
 from fastapi import FastAPI, HTTPException
 
-import genai
-from duckduckgo_search import AsyncDDGS
+import google.genai as genai
+from ddgs import DDGS
 
 from shared.models import WorkerRequest, WorkerResponse
 
 app = FastAPI(title="Search Bot")
 client = genai.Client()
+
+# LangSmith tracing support (optional)
+try:
+    from langchain import LangSmithTracer
+    tracer = LangSmithTracer()
+    tracer.service = "search-bot"
+except ImportError:
+    tracer = None
 
 
 async def _formulate_query(user_query: str) -> str:
@@ -20,18 +28,23 @@ async def _formulate_query(user_query: str) -> str:
         "Given the question below, output a single short search string (no explanation).\n\n" +
         user_query
     )
-    resp = client.responses.create(model="gemini-2.5-flash", input=prompt)
-    query = resp.output_text if hasattr(resp, "output_text") else ""
-    if not query and resp.output:
-        query = "".join(str(item) for item in resp.output)
+    if tracer is not None:
+        with tracer.as_default():
+            resp = client.models.generate_content(
+                model="gemini-2.5-flash", contents=prompt)
+    else:
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash", contents=prompt)
+    query = resp.text or ""
     return query.strip().strip('"')
 
 
 async def _search_web(query: str) -> List[dict]:
-    # run DDGS search asynchronously
-    results: List[dict] = []
-    async for r in AsyncDDGS().text(query, max_results=3):
-        results.append(r)
+    # the DDGS client is synchronous; run it in a thread to avoid blocking the event loop
+    def sync_search(q: str) -> List[dict]:
+        return DDGS().text(q, max_results=3)
+
+    results = await asyncio.to_thread(sync_search, query)
     return results
 
 
@@ -40,10 +53,14 @@ async def _summarize(snippets: List[str]) -> str:
         "You are a summarization assistant. Read the following web snippets and produce a concise factual summary. "
         "Combine them into a few sentences.\n\n" + "\n---\n".join(snippets)
     )
-    resp = client.responses.create(model="gemini-2.5-flash", input=prompt)
-    text = resp.output_text if hasattr(resp, "output_text") else ""
-    if not text and resp.output:
-        text = "".join(str(item) for item in resp.output)
+    if tracer is not None:
+        with tracer.as_default():
+            resp = client.models.generate_content(
+                model="gemini-2.5-flash", contents=prompt)
+    else:
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash", contents=prompt)
+    text = resp.text or ""
     return text.strip()
 
 

@@ -2,6 +2,8 @@ fastapi
 uvicorn
 httpx
 pydantic
-google-genai
-langgraph
 chromadb
+langgraph
+google-genai
+langchain
+langsmith

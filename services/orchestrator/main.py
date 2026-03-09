@@ -14,8 +14,24 @@ from shared.models import AgentState, WorkerRequest, WorkerResponse
 # LangGraph imports (assumed available via pip install langgraph)
 from langgraph.graph import StateGraph
 
+from langsmith import wrappers, traceable
+
 app = FastAPI(title="RiskNexus Orchestrator")
-client = genai.Client()
+raw_client = genai.Client()
+
+# wrap the underlying client so that usage_metadata (tokens, cost, etc.)
+# emitted by Gemini responses is automatically collected by LangSmith
+client = wrappers.wrap_gemini(raw_client)
+
+
+# helper used by the router; decorated so that the run appears as an
+# "llm" span in the LangSmith dashboard and token usage is measured.
+@traceable("llm")
+async def call_router_llm(prompt: str) -> str:
+    # the wrapped client handles telemetry; just return the text
+    resp = client.models.generate_content(
+        model="gemini-2.5-pro", contents=prompt)
+    return resp.text or ""
 
 # --- LangSmith tracing ----------------------------------------------------
 # if langchain/langsmith are installed and the environment variables are set,
@@ -46,29 +62,37 @@ async def router(state: AgentState) -> AgentState:
         "\"doc-bot\", \"decision-bot\", \"calc-bot\", \"embedding-bot\"] that are needed.\n\n"
         f"Query:\n{state['query']}"
     )
-    # new API: use models.generate_content. `contents` may be a string.
+    # helper will perform the LLM call and is itself traceable
     try:
         if tracer is not None:
             with tracer.as_default():
-                resp = client.models.generate_content(
-                    model="gemini-2.5-pro", contents=prompt)
+                raw = await call_router_llm(prompt)
         else:
-            resp = client.models.generate_content(
-                model="gemini-2.5-pro", contents=prompt)
-        # convenience property returns concatenated text parts
-        text = resp.text or ""
+            raw = await call_router_llm(prompt)
+        text = raw or ""
+
+        # strip markdown code fences, backticks, and any leading "json" label
+        def _clean(t: str) -> str:
+            t = t.strip()
+            if t.startswith("```") and t.endswith("```"):
+                t = t[3:-3].strip()
+            t = t.strip("`")
+            if t.lower().startswith("json"):
+                t = t[len("json"):].strip()
+            return t
+
+        clean_text = _clean(text)
         try:
-            names = json.loads(text)
+            names = json.loads(clean_text)
         except Exception:
+            print(f"DEBUG: Failed to parse JSON: {text}")
             names = []
         state["required_workers"] = names
-    except Exception as e:
+    except Exception:
         # if the LLM call fails (rate limit, 503, etc.) just continue with no workers
         state["required_workers"] = []
     return state
 
-
-# --- Parallel executor node ------------------------------------------------
 # --- Parallel executor node ------------------------------------------------
 async def execute_workers(state: AgentState) -> AgentState:
     raw_workers: List[str] = state.get("required_workers", []) or []
@@ -123,6 +147,9 @@ async def execute_workers(state: AgentState) -> AgentState:
 
 async def synthesize(state: AgentState) -> AgentState:
     responses = state.get("worker_responses", []) or []
+    if not responses:
+        state["final_summary"] = "I'm sorry, but your request doesn't seem related to the banking or risk data I'm trained to handle."
+        return state
     # simple aggregation for PoC: concatenate messages
     summary_parts: List[str] = []
     for r in responses:

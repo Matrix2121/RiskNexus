@@ -42,7 +42,7 @@ async def _formulate_query(user_query: str) -> str:
 async def _search_web(query: str) -> List[dict]:
     # the DDGS client is synchronous; run it in a thread to avoid blocking the event loop
     def sync_search(q: str) -> List[dict]:
-        return DDGS().text(q, max_results=3)
+        return DDGS().text(q, max_results=3, region='bg-bg')
 
     results = await asyncio.to_thread(sync_search, query)
     return results

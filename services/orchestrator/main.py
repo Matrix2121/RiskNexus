@@ -14,7 +14,7 @@ from shared.models import AgentState, WorkerRequest, WorkerResponse
 # LangGraph imports (assumed available via pip install langgraph)
 from langgraph.graph import StateGraph
 
-from langsmith import wrappers, traceable
+from langsmith import wrappers, traceable, get_current_run_tree
 
 app = FastAPI(title="RiskNexus Orchestrator")
 raw_client = genai.Client()
@@ -30,7 +30,7 @@ client = wrappers.wrap_gemini(raw_client)
 async def call_router_llm(prompt: str) -> str:
     # the wrapped client handles telemetry; just return the text
     resp = client.models.generate_content(
-        model="gemini-2.5-pro", contents=prompt)
+        model="gemini-2.5-flash", contents=prompt)
     return resp.text or ""
 
 # --- LangSmith tracing ----------------------------------------------------
@@ -59,7 +59,7 @@ async def router(state: AgentState) -> AgentState:
     prompt = (
         "You are a router determining which microservice workers should handle a user query. "
         "Return a JSON array of service names from [\"sql-bot\", \"graph-bot\", \"search-bot\", "
-        "\"doc-bot\", \"decision-bot\", \"calc-bot\", \"embedding-bot\"] that are needed.\n\n"
+        "\"doc-bot\", \"embedding-bot\"] that are needed.\n\n" #add calc-bot and decision-bot
         f"Query:\n{state['query']}"
     )
     # helper will perform the LLM call and is itself traceable
@@ -105,8 +105,8 @@ async def execute_workers(state: AgentState) -> AgentState:
         "graph-bot",
         "search-bot",
         "doc-bot",
-        "decision-bot",
-        "calc-bot",
+        #"decision-bot",
+        #"calc-bot",
         "embedding-bot"
     }
 
@@ -118,13 +118,20 @@ async def execute_workers(state: AgentState) -> AgentState:
         if clean_name in VALID_WORKERS:
             sanitized_workers.add(clean_name)
 
+        run_tree = get_current_run_tree()
+        ls_headers = run_tree.to_headers() if run_tree else {}
+
     async with httpx.AsyncClient(timeout=3600.0) as hc:
         tasks = []
         # 3. Use the sanitized list to build the URLs
         for w in sanitized_workers:
             url = f"http://{w}:8000/query"
             req_obj = WorkerRequest(query=query, context=ctx)
-            tasks.append(hc.post(url, json=req_obj.model_dump()))
+            tasks.append(hc.post(
+                url, 
+                json=req_obj.model_dump(), 
+                headers=ls_headers
+            ))
 
         # Execute all valid tasks concurrently
         responses = await asyncio.gather(*tasks, return_exceptions=True)
@@ -145,19 +152,35 @@ async def execute_workers(state: AgentState) -> AgentState:
 # --- Synthesis node --------------------------------------------------------
 
 
+@traceable(run_type="llm", name="Final-Synthesizer")
 async def synthesize(state: AgentState) -> AgentState:
     responses = state.get("worker_responses", []) or []
     if not responses:
-        state["final_summary"] = "I'm sorry, but your request doesn't seem related to the banking or risk data I'm trained to handle."
+        state["final_summary"] = "Няма намерена информация."
         return state
-    # simple aggregation for PoC: concatenate messages
-    summary_parts: List[str] = []
-    for r in responses:
-        if isinstance(r, dict):
-            summary_parts.append(r.get("message", ""))
-    state["final_summary"] = "\n".join(summary_parts)
-    return state
 
+    # Предаваме директно данните към Gemini за кратък превод и синтез
+    prompt = (
+        "По-долу са резултати от търсене в банкова система (някои може да са на английски). "
+        "Предоставете кратко обобщение на намерената информация на БЪЛГАРСКИ ЕЗИК. "
+        "Ако има грешка в някой бот, просто я преведете накратко. "
+        "Бъдете максимално кратки и не пишете уводи или доклади. "
+        "Формат: Списък или кратки абзаци.\n\n"
+        f"Данни: {json.dumps(responses, ensure_ascii=False)}"
+    )
+    
+    try:
+        resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt) ##TO-DO Change to pro model
+        state["final_summary"] = resp.text.strip()
+    except Exception as e:
+        # Резервен вариант при проблем с LLM - връщаме суровите съобщения
+        summary_parts = []
+        for r in responses:
+            msg = r.get("message") or r.get("detail") or str(r)
+            summary_parts.append(str(msg))
+        state["final_summary"] = "\n".join(summary_parts)
+        
+    return state
 
 # --- Assemble LangGraph ----------------------------------------------------
 # StateGraph constructor changed: it now requires a state_schema argument (the type

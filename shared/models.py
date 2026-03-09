@@ -36,6 +36,6 @@ class AgentState(TypedDict, total=False):
     graph_data: Optional[Dict[str, Any]]
     search_data: Optional[Dict[str, Any]]
     doc_data: Optional[Dict[str, Any]]
-    calc_results: Optional[Dict[str, Any]]
-    decision_profile: Optional[str]
+    #calc_results: Optional[Dict[str, Any]]
+    #decision_profile: Optional[str]
     final_summary: Optional[str]

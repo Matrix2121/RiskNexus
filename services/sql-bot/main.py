@@ -1,16 +1,19 @@
 from __future__ import annotations
+from psycopg2.extras import RealDictCursor
+import psycopg2
 import os
 import asyncio
 from typing import Any, Dict, List
 
 from fastapi import FastAPI, HTTPException, Request
 import google.genai as genai
+import chromadb
 from shared.models import WorkerRequest, WorkerResponse
-from shared.sql_schema import RiskSQLSchema
 from langsmith import wrappers, traceable, tracing_context
 
-import psycopg2
-from psycopg2.extras import RealDictCursor
+# initialize ChromaDB client for schema lookups
+chroma_client = chromadb.HttpClient(host="chromadb", port=8000)
+
 
 app = FastAPI(title="SQL Bot")
 raw_client = genai.Client()
@@ -30,6 +33,39 @@ def _clean_code(text: str) -> str:
     if t.startswith("```") and t.endswith("```"):
         t = t[3:-3].strip()
     return t.strip("`")
+
+
+@traceable(run_type="embedding", name="Embed-Query")
+async def _embed_query(text: str) -> list[float]:
+    resp = client.models.embed_content(
+        model="gemini-embedding-001", contents=text)
+    return resp.embeddings[0].values
+
+
+@traceable(run_type="tool", name="Retrieve-SQL-Schema")
+async def _get_relevant_schema(query: str, collection_name: str = "sql_schema") -> str:
+    emb = await _embed_query(query)
+    coll = chroma_client.get_collection(name=collection_name)
+    
+    # Издърпваме до 10 резултата (ако имате повече таблици в бъдеще)
+    results = coll.query(query_embeddings=[emb], n_results=10)
+    
+    docs = results.get("documents", [[]])[0]
+    distances = results.get("distances", [[]])[0] # По-малко число = по-добро съвпадение
+    
+    relevant_docs = []
+    
+    if distances:
+        # Взимаме резултата на най-доброто съвпадение
+        best_score = distances[0]
+        
+        # Динамичен филтър: Взимаме най-добрата таблица + всички други, 
+        # чието "разстояние" е много близко до най-доброто (напр. разлика до 0.15)
+        for doc, dist in zip(docs, distances):
+            if dist <= best_score + 0.15:
+                relevant_docs.append(str(doc))
+                
+    return "\n\n".join(relevant_docs)
 
 
 @traceable(run_type="llm", name="SQL-Generation")
@@ -77,8 +113,8 @@ async def _synthesize_answer(rows: List[Dict[str, Any]]) -> str:
 
 @traceable(run_type="tool", name="SQL-Bot-Execution")
 async def _process_sql_query(query: str) -> WorkerResponse:
-    schema = RiskSQLSchema()
-    schema_ctx = schema.get_sql_context()
+    # retrieve only relevant schema chunks from ChromaDB
+    schema_ctx = await _get_relevant_schema(query)
 
     # generate SQL
     sql = await _generate_sql(query, schema_ctx)

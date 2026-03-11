@@ -55,13 +55,27 @@ except ImportError:
 # can keep the nodes async. Alternatively, these could be regular def
 # functions if you prefer.
 async def router(state: AgentState) -> AgentState:
-    # ask the LLM which worker bots are required
+    # 1. Extract the history from the state
+    ctx = state.get("user_context", {}) or {}
+    chat_history = ctx.get("chat_history", [])
+    
+    # 2. Format the history
+    formatted_history = "No previous history."
+    if chat_history:
+        formatted_history = "\n".join(
+            [f"{'User' if msg['role'] == 'user' else 'System'}: {msg['content']}" 
+             for msg in chat_history[-4:]]
+        )
+
+    # 3. Ask the LLM which worker bots are required, including context
     prompt = (
         "You are a router determining which microservice workers should handle a user query. "
         "Return a JSON array of service names from [\"sql-bot\", \"graph-bot\", \"search-bot\", "
-        "\"doc-bot\", \"embedding-bot\"] that are needed.\n\n" #add calc-bot and decision-bot
-        f"Query:\n{state['query']}"
+        "\"doc-bot\", \"embedding-bot\"] that are needed.\n\n" 
+        f"CONVERSATION HISTORY (Context for the latest query):\n{formatted_history}\n\n"
+        f"LATEST USER QUERY:\n{state['query']}"
     )
+    
     # helper will perform the LLM call and is itself traceable
     try:
         if tracer is not None:
@@ -101,9 +115,9 @@ async def execute_workers(state: AgentState) -> AgentState:
 
     # 1. Define the whitelist of valid service hostnames
     VALID_WORKERS = {
-        #"sql-bot",
-        #"graph-bot",
-        #"search-bot",
+        "sql-bot",
+        "graph-bot",
+        "search-bot",
         "doc-bot",
         #"decision-bot",
         #"calc-bot",

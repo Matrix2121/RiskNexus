@@ -2,7 +2,7 @@ fastapi
 uvicorn
 httpx
 pydantic
-# chromadb used to assist with schema search but replaced by RiskSQLSchema
+chromadb
 langgraph
 google-genai
 langchain

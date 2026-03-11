@@ -18,6 +18,9 @@ from langsmith import wrappers, traceable, tracing_context
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from shared.sql_schema import RiskSQLSchema
+from shared.graph_schema import RiskGraphSchema
+
 # Models
 
 
@@ -55,6 +58,42 @@ REQUIRED_COLLECTIONS = [
     "documents"
 ]
 
+@app.post("/sync-schemas")
+async def sync_schemas():
+    """Reads the static Python schema definitions and embeds them into ChromaDB."""
+    try:
+        sql_schema = RiskSQLSchema()
+        graph_schema = RiskGraphSchema()
+        
+        sql_docs = sql_schema.get_documents_for_embedding()
+        graph_docs = graph_schema.get_documents_for_embedding()
+        
+        # 1. Запис на SQL схемата
+        sql_collection = chroma_client.get_collection(name="sql_schema")
+        for doc in sql_docs:
+            vector = await _embed(doc["text"])
+            # Използваме upsert вместо add, за да презаписваме старите данни, ако натиснем бутона пак
+            sql_collection.upsert(
+                ids=[doc["id"]],
+                documents=[doc["text"]],
+                metadatas=[doc["metadata"]],
+                embeddings=[vector]
+            )
+            
+        # 2. Запис на Graph схемата
+        graph_collection = chroma_client.get_collection(name="graph_schema")
+        for doc in graph_docs:
+            vector = await _embed(doc["text"])
+            graph_collection.upsert(
+                ids=[doc["id"]],
+                documents=[doc["text"]],
+                metadatas=[doc["metadata"]],
+                embeddings=[vector]
+            )
+            
+        return {"status": "success", "message": "Schemas successfully synced to ChromaDB."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.on_event("startup")
 async def initialize_collections():

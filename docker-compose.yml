@@ -6,6 +6,16 @@ version: "3.8"
 # - all services share a custom network
 
 services:
+  frontend:
+    build: 
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "8501:8501"
+    networks:
+      - risknexus_net
+    depends_on:
+      - orchestrator
   postgres-db:
     image: postgres:16
     container_name: risknexus-postgres

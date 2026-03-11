@@ -7,10 +7,13 @@ from typing import Any, Dict, List
 from fastapi import FastAPI, Request
 from langsmith import tracing_context, wrappers, traceable
 import google.genai as genai
+import chromadb
 from shared.models import WorkerRequest, WorkerResponse
-from shared.graph_schema import RiskGraphSchema
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
+
+# Chroma client for schema search
+chroma_client = chromadb.HttpClient(host="chromadb", port=8000)
 
 load_dotenv(override=True)
 
@@ -34,6 +37,39 @@ def _clean_code(text: str) -> str:
     if t.startswith("```") and t.endswith("```"):
         t = t[3:-3].strip()
     return t.strip("`")
+
+
+@traceable(run_type="embedding", name="Embed-Query")
+async def _embed_query(text: str) -> list[float]:
+    resp = client.models.embed_content(
+        model="gemini-embedding-001", contents=text)
+    return resp.embeddings[0].values
+
+
+@traceable(run_type="tool", name="Retrieve-Graph-Schema")
+async def _get_relevant_schema(query: str, collection_name: str = "sql_schema") -> str:
+    emb = await _embed_query(query)
+    coll = chroma_client.get_collection(name=collection_name)
+    
+    # Издърпваме до 10 резултата (ако имате повече таблици в бъдеще)
+    results = coll.query(query_embeddings=[emb], n_results=10)
+    
+    docs = results.get("documents", [[]])[0]
+    distances = results.get("distances", [[]])[0] # По-малко число = по-добро съвпадение
+    
+    relevant_docs = []
+    
+    if distances:
+        # Взимаме резултата на най-доброто съвпадение
+        best_score = distances[0]
+        
+        # Динамичен филтър: Взимаме най-добрата таблица + всички други, 
+        # чието "разстояние" е много близко до най-доброто (напр. разлика до 0.15)
+        for doc, dist in zip(docs, distances):
+            if dist <= best_score + 0.15:
+                relevant_docs.append(str(doc))
+                
+    return "\n\n".join(relevant_docs)
 
 
 @traceable(run_type="llm", name="Graph-Cypher-Generation")
@@ -86,16 +122,15 @@ async def _synthesize_answer(rows: List[Dict[str, Any]]) -> str:
 # 1. Extract the core logic into its own traceable function
 @traceable(run_type="tool", name="Graph-Bot-Execution")
 async def _process_graph_query(query: str) -> WorkerResponse:
-    schema = RiskGraphSchema()
-    schema_ctx = schema.get_cypher_context()
-    
+    schema_ctx = await _get_relevant_schema(query)
+
     cypher = await _generate_cypher(query, schema_ctx)
     if not cypher:
         return WorkerResponse(
             status="ERROR",
             message="LLM failed to generate a Cypher query."
         )
-        
+
     try:
         rows = await _run_neo4j(cypher)
     except Exception as e:
@@ -103,7 +138,7 @@ async def _process_graph_query(query: str) -> WorkerResponse:
             status="ERROR",
             message=f"Invalid Cypher: {cypher}. Error: {e}"
         )
-        
+
     answer = await _synthesize_answer(rows)
     return WorkerResponse(
         status="SUCCESS",
@@ -112,7 +147,7 @@ async def _process_graph_query(query: str) -> WorkerResponse:
     )
 
 
-# 2. Remove @traceable from the endpoint. 
+# 2. Remove @traceable from the endpoint.
 # Establish the context first, THEN call the traced logic.
 @app.post("/query", response_model=WorkerResponse)
 async def handle_query(req: WorkerRequest, request: Request):

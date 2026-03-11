@@ -9,7 +9,7 @@ from pydantic import BaseModel
 # WorkerRequest model for internal communication between orchestrator and bots
 class WorkerRequest(BaseModel):
     query: str
-    context: Dict[str, Optional[str]] = {}
+    context: Dict[str, Any] = {}
 
 
 # WorkerResponse model returned by worker bots

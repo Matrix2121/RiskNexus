@@ -6,4 +6,8 @@ chromadb
 langgraph
 google-genai
 langchain
+langchain-neo4j
+langchain-core
+langchain-google-genai
 langsmith
+neo4j

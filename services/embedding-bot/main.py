@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 import google.genai as genai
+from langsmith import wrappers, traceable, tracing_context
 
 # Models
 
@@ -19,7 +20,8 @@ class TextPayload(BaseModel):
 
 
 app = FastAPI(title="Embedding Bot")
-client = genai.Client()
+raw_client = genai.Client()
+client = wrappers.wrap_gemini(raw_client)
 
 # optional LangSmith tracing
 try:
@@ -55,6 +57,7 @@ async def initialize_collections():
             print(f"Failed to initialize collection {collection_name}: {e}")
 
 
+@traceable(run_type="llm", name="Metadata-Generation")
 async def _generate_metadata(text: str) -> Dict[str, Any]:
     prompt = (
         "Given the following text, return a JSON object with two keys: "
@@ -75,6 +78,7 @@ async def _generate_metadata(text: str) -> Dict[str, Any]:
         return {"summary": "Extraction failed", "tags": []}
 
 
+@traceable(run_type="embedding", name="Embedding-Call")
 async def _embed(text: str) -> list[float]:
     if tracer is not None:
         with tracer.as_default():
@@ -87,21 +91,22 @@ async def _embed(text: str) -> list[float]:
 
 
 @app.post("/embed/{collection_name}")
-async def embed_generic(collection_name: str, payload: TextPayload):
-    if collection_name not in REQUIRED_COLLECTIONS:
-        raise HTTPException(status_code=404, detail="Unknown collection")
+async def embed_generic(collection_name: str, payload: TextPayload, request: Request):
+    with tracing_context(parent=request.headers):
+        if collection_name not in REQUIRED_COLLECTIONS:
+            raise HTTPException(status_code=404, detail="Unknown collection")
 
-    metadata = await _generate_metadata(payload.text)
-    vector = await _embed(payload.text)
+        metadata = await _generate_metadata(payload.text)
+        vector = await _embed(payload.text)
 
-    # Use client to add data
-    collection = chroma_client.get_collection(name=collection_name)
-    collection.add(
-        ids=[str(uuid.uuid4())],
-        documents=[payload.text],
-        metadatas=[metadata],
-        embeddings=[vector]
-    )
-    return {"status": "success", "metadata": metadata}
+        # Use client to add data
+        collection = chroma_client.get_collection(name=collection_name)
+        collection.add(
+            ids=[str(uuid.uuid4())],
+            documents=[payload.text],
+            metadatas=[metadata],
+            embeddings=[vector]
+        )
+        return {"status": "success", "metadata": metadata}
 
 # (Existing convenience wrappers /embed/documents, etc. would follow here)

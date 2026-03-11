@@ -104,10 +104,10 @@ async def execute_workers(state: AgentState) -> AgentState:
         "sql-bot",
         "graph-bot",
         "search-bot",
-        "doc-bot",
+        #"doc-bot",
         #"decision-bot",
         #"calc-bot",
-        "embedding-bot"
+        #"embedding-bot"
     }
 
     # 2. Sanitize and filter the LLM's output
@@ -146,8 +146,8 @@ async def execute_workers(state: AgentState) -> AgentState:
             except Exception as e:
                 results.append({"status": "ERROR", "message": str(e)})
 
-    state["worker_responses"] = results
-    return state
+    # Return ONLY the dictionary of what you want to append
+    return {"worker_responses": results}
 
 # --- Synthesis node --------------------------------------------------------
 

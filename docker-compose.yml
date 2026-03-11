@@ -6,6 +6,21 @@ version: "3.8"
 # - all services share a custom network
 
 services:
+  postgres-db:
+    image: postgres:16
+    container_name: risknexus-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: main
+    ports:
+      - "5432:5432" # This exposes the DB to your local machine (for pgAdmin)
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - risknexus_net
+
   chromadb:
     image: chromadb/chroma:latest
     volumes:
@@ -55,11 +70,19 @@ services:
       - LANGSMITH_API_KEY=${LANGSMITH_API_KEY}
       - LANGSMITH_PROJECT=${LANGSMITH_PROJECT}
       - CHROMA_URL=http://chromadb:8000
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_PORT=${POSTGRES_PORT}
 
   graph-bot:
     build: 
       context: .
       dockerfile: ./services/graph-bot/Dockerfile
+    depends_on:
+      chromadb:
+        condition: service_healthy
     networks:
       - risknexus_net
     environment:
@@ -70,6 +93,9 @@ services:
       - LANGSMITH_API_KEY=${LANGSMITH_API_KEY}
       - LANGSMITH_PROJECT=${LANGSMITH_PROJECT}
       - CHROMA_URL=http://chromadb:8000
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USER=${NEO4J_USER}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
 
   search-bot:
     build: 
@@ -136,3 +162,6 @@ services:
 networks:
   risknexus_net:
     driver: bridge
+
+volumes:
+  pg_data:

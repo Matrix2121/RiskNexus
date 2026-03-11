@@ -8,15 +8,20 @@ from fastapi import FastAPI, HTTPException
 
 import google.genai as genai
 from shared.models import WorkerRequest, WorkerResponse
+from fastapi import FastAPI, HTTPException, Request
+from langsmith import wrappers, traceable, tracing_context
 
 # Initialize the official ChromaDB HTTP Client
 # 'chromadb' is the hostname of the service in your docker-compose.yml
 chroma_client = chromadb.HttpClient(host="chromadb", port=8000)
 
-client = genai.Client()
+# wrap genai client for usage metadata
+raw_client = genai.Client()
+client = wrappers.wrap_gemini(raw_client)
+
 app = FastAPI(title="Documentation Bot")
 
-# optional LangSmith tracing
+# optional LangSmith tracer
 try:
     from langchain import LangSmithTracer
     tracer = LangSmithTracer()
@@ -43,6 +48,7 @@ async def _search_docs(query: str) -> Dict[str, Any]:
             status_code=500, detail=f"ChromaDB Query Failed: {str(e)}")
 
 
+@traceable(run_type="llm", name="Doc-Bot-Answer")
 async def _answer_from_chunks(results: Dict[str, Any], user_query: str) -> str:
     # results['documents'] is a list of lists; we take the first list [0]
     texts = results.get("documents", [[]])[0]
@@ -68,31 +74,32 @@ async def _answer_from_chunks(results: Dict[str, Any], user_query: str) -> str:
 
 
 @app.post("/query", response_model=WorkerResponse)
-async def handle_query(req: WorkerRequest):
-    # Step 1: Search ChromaDB using the new client logic
-    results = await _search_docs(req.query)
+async def handle_query(req: WorkerRequest, request: Request):
+    with tracing_context(parent=request.headers):
+        # Step 1: Search ChromaDB using the new client logic
+        results = await _search_docs(req.query)
 
-    # Check if we actually got documents back
-    if not results.get("documents") or not results["documents"][0]:
-        return WorkerResponse(status="SUCCESS", data={"answer": ""}, citations=[], message="no relevant chunks")
+        # Check if we actually got documents back
+        if not results.get("documents") or not results["documents"][0]:
+            return WorkerResponse(status="SUCCESS", data={"answer": ""}, citations=[], message="no relevant chunks")
 
-    # Step 2: Generate answer
-    answer = await _answer_from_chunks(results, req.query)
+        # Step 2: Generate answer
+        answer = await _answer_from_chunks(results, req.query)
 
-    # Step 3: Build citations from the structured metadata returned by the client
-    citations = []
-    # metadatas is also a list of lists
-    for md in results.get("metadatas", [[]])[0]:
-        file = md.get("filename", "Unknown Source")
-        page = md.get("page", "N/A")
-        citations.append(f"{file} (Page {page})")
+        # Step 3: Build citations from the structured metadata returned by the client
+        citations = []
+        # metadatas is also a list of lists
+        for md in results.get("metadatas", [[]])[0]:
+            file = md.get("filename", "Unknown Source")
+            page = md.get("page", "N/A")
+            citations.append(f"{file} (Page {page})")
 
-    return WorkerResponse(
-        status="SUCCESS",
-        data={"answer": answer},
-        citations=citations,
-        message="Generated response from internal documentation."
-    )
+        return WorkerResponse(
+            status="SUCCESS",
+            data={"answer": answer},
+            citations=citations,
+            message="Generated response from internal documentation."
+        )
 
 if __name__ == "__main__":
     import uvicorn

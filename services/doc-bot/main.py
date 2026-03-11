@@ -29,16 +29,35 @@ try:
 except ImportError:
     tracer = None
 
+@traceable(run_type="embedding", name="Embed-Query")
+async def _embed_query(text: str) -> list[float]:
+    """Converts the user's question into a Gemini vector."""
+    if tracer is not None:
+        with tracer.as_default():
+            response = client.models.embed_content(
+                model="gemini-embedding-001",
+                contents=text
+            )
+    else:
+        response = client.models.embed_content(
+            model="gemini-embedding-001",
+            contents=text
+        )
+    return response.embeddings[0].values
 
-async def _search_docs(query: str) -> Dict[str, Any]:
-    """Uses the official client to query the collection by name."""
+
+@traceable(run_type="retriever", name="ChromaDB-Search")
+async def _search_docs(query: str, collection_name: str = "documents") -> Dict[str, Any]:
+    """Searches ChromaDB using Gemini embeddings."""
     try:
-        # Step 1: Get the collection object (Client handles UUID lookup automatically)
-        collection = chroma_client.get_collection(name="docs_regulations")
+        collection = chroma_client.get_collection(name=collection_name)
 
-        # Step 2: Perform the semantic search
+        # 1. Embed the search query using Gemini first
+        query_vector = await _embed_query(query)
+
+        # 2. Search using 'query_embeddings' instead of 'query_texts'
         results = collection.query(
-            query_texts=[query],
+            query_embeddings=[query_vector],
             n_results=5,
             include=["documents", "metadatas"]
         )
@@ -47,19 +66,16 @@ async def _search_docs(query: str) -> Dict[str, Any]:
         raise HTTPException(
             status_code=500, detail=f"ChromaDB Query Failed: {str(e)}")
 
-
 @traceable(run_type="llm", name="Doc-Bot-Answer")
-async def _answer_from_chunks(results: Dict[str, Any], user_query: str) -> str:
-    # results['documents'] is a list of lists; we take the first list [0]
-    texts = results.get("documents", [[]])[0]
-
-    if not texts:
+async def _answer_from_chunks(chunks: List[str], user_query: str) -> str:
+    if not chunks:
         return "I don't know."
 
     prompt = (
-        "You are a helpful assistant. Answer the question using ONLY the following text chunks. "
+        "You are a compliance assistant. Answer the question using ONLY the provided chunks. "
+        "Include inline citations in your response corresponding to the sources (e.g., '... [Source: policy.pdf]'). "
         "If the answer is not contained in the chunks, say 'I don't know'.\n\n" +
-        "\n---\n".join(texts) + "\n\nQuestion:\n" + user_query
+        "\n---\n".join(chunks) + "\n\nQuestion:\n" + user_query
     )
 
     if tracer is not None:
@@ -76,20 +92,41 @@ async def _answer_from_chunks(results: Dict[str, Any], user_query: str) -> str:
 @app.post("/query", response_model=WorkerResponse)
 async def handle_query(req: WorkerRequest, request: Request):
     with tracing_context(parent=request.headers):
+        # determine collection dynamically
+        collection = req.context.get("collection") if req.context else None
+        if not collection:
+            collection = "documents"
         # Step 1: Search ChromaDB using the new client logic
-        results = await _search_docs(req.query)
+        results = await _search_docs(req.query, collection)
 
         # Check if we actually got documents back
-        if not results.get("documents") or not results["documents"][0]:
+        docs = results.get("documents", [[]])[0]
+        metas = results.get("metadatas", [[]])[0]
+        if not docs:
             return WorkerResponse(status="SUCCESS", data={"answer": ""}, citations=[], message="no relevant chunks")
 
-        # Step 2: Generate answer
-        answer = await _answer_from_chunks(results, req.query)
+        # build formatted chunks with source info and new metadata
+        chunks: List[str] = []
+        for idx, (text, md) in enumerate(zip(docs, metas), start=1):
+            filename = md.get("filename", "Unknown Source")
+            section = md.get("section_title", "N/A")
+            date = md.get("effective_date", "N/A")
+            summary_metadata = md.get("topic_summary", "")
+            chunks.append(
+                f"Chunk {idx}:\n"
+                f"- Source file: {filename}\n"
+                f"- Section: {section}\n"
+                f"- Date: {date}\n"
+                f"- Summary: {summary_metadata}\n"
+                f"Text:\n{text}"
+            )
 
-        # Step 3: Build citations from the structured metadata returned by the client
+        # Step 2: Generate answer
+        answer = await _answer_from_chunks(chunks, req.query)
+
+        # optionally build a simple citation list as before
         citations = []
-        # metadatas is also a list of lists
-        for md in results.get("metadatas", [[]])[0]:
+        for md in metas:
             file = md.get("filename", "Unknown Source")
             page = md.get("page", "N/A")
             citations.append(f"{file} (Page {page})")

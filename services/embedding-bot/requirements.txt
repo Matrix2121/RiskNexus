@@ -3,7 +3,12 @@ uvicorn
 httpx
 pydantic
 chromadb
+python-multipart
+PyPDF2
 langgraph
 google-genai
 langchain
+langchain-community
+langchain-google-genai
+langchain-text-splitters
 langsmith

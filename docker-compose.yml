@@ -150,6 +150,8 @@ services:
         condition: service_healthy
     networks:
       - risknexus_net
+    ports:
+      - "8003:8000"
     environment:
       - WORKER_REQUEST_TIMEOUT=3600
       - GEMINI_API_KEY=${GEMINI_API_KEY}

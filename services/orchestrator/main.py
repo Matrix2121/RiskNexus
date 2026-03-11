@@ -101,13 +101,13 @@ async def execute_workers(state: AgentState) -> AgentState:
 
     # 1. Define the whitelist of valid service hostnames
     VALID_WORKERS = {
-        "sql-bot",
-        "graph-bot",
-        "search-bot",
-        #"doc-bot",
+        #"sql-bot",
+        #"graph-bot",
+        #"search-bot",
+        "doc-bot",
         #"decision-bot",
         #"calc-bot",
-        #"embedding-bot"
+        "embedding-bot"
     }
 
     # 2. Sanitize and filter the LLM's output

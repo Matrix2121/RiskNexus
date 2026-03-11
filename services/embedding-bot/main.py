@@ -1,22 +1,35 @@
 from __future__ import annotations
 
+import io
 import os
 import json
 import uuid
-from typing import Any, Dict
+import asyncio
+from typing import Any, Dict, List, Optional
 
 import chromadb
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel
 
 import google.genai as genai
 from langsmith import wrappers, traceable, tracing_context
+
+# LangChain imports for advanced metadata
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # Models
 
 
 class TextPayload(BaseModel):
     text: str
+    source_metadata: Optional[Dict[str, Any]] = None
+
+
+class DocumentMetadata(BaseModel):
+    section_title: str
+    effective_date: str
+    topic_summary: str
 
 
 app = FastAPI(title="Embedding Bot")
@@ -36,13 +49,10 @@ chroma_client = chromadb.HttpClient(host="chromadb", port=8000)
 
 # Defined collections from the spec
 REQUIRED_COLLECTIONS = [
-    "documents",
-    "sql-schemas",
-    "graph-schemas",
-    "docs_regulations",
-    "docs_contracts",
-    "schema_sql_core",
-    "schema_graph_entities"
+    "sql_schema",
+    "graph_schema",
+    "regulations",
+    "documents"
 ]
 
 
@@ -59,35 +69,98 @@ async def initialize_collections():
 
 @traceable(run_type="llm", name="Metadata-Generation")
 async def _generate_metadata(text: str) -> Dict[str, Any]:
-    prompt = (
-        "Given the following text, return a JSON object with two keys: "
-        "`summary` (a brief natural-language summary) and `tags` (a list of relevant short keywords). "
-        "The output must be valid JSON and nothing else.\nText:\n" + text
-    )
-    if tracer is not None:
-        with tracer.as_default():
-            response = client.models.generate_content(
-                model="gemini-2.5-flash-lite", contents=prompt)
-    else:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-lite", contents=prompt)
-    raw = response.text or ""
+    # use LangChain structured output to build DocumentMetadata
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0)
+    chain = llm.with_structured_output(DocumentMetadata)
+    
     try:
-        return json.loads(raw.strip().strip("```json").strip("```"))
-    except Exception:
-        return {"summary": "Extraction failed", "tags": []}
+        if tracer is not None:
+            with tracer.as_default():
+                result = await chain.ainvoke(text)
+        else:
+            result = await chain.ainvoke(text)
+            
+        # Pydantic v1/v2 compatibility
+        if hasattr(result, "model_dump"):
+            return result.model_dump()
+        return result.dict()
+    except Exception as e:
+        # Fallback just in case the LLM refuses to answer or hits a rate limit
+        print(f"Metadata extraction failed: {e}")
+        return {
+            "section_title": "unknown", 
+            "effective_date": "unknown", 
+            "topic_summary": "unknown"
+        }
 
 
 @traceable(run_type="embedding", name="Embedding-Call")
 async def _embed(text: str) -> list[float]:
     if tracer is not None:
         with tracer.as_default():
-            emb = client.embeddings.create(
-                model="gemini-embedding-001", input=text)
+            response = client.models.embed_content(
+                model="gemini-embedding-001",
+                contents=text
+            )
     else:
-        emb = client.embeddings.create(
-            model="gemini-embedding-001", input=text)
-    return emb.data[0].embedding
+        response = client.models.embed_content(
+            model="gemini-embedding-001",
+            contents=text
+        )
+    return response.embeddings[0].values
+
+
+@traceable(run_type="chain", name="Process-File-Upload")
+async def _process_upload(collection_name: str, file: UploadFile) -> Dict[str, Any]:
+    if collection_name not in REQUIRED_COLLECTIONS:
+        raise HTTPException(status_code=404, detail="Unknown collection")
+
+    contents = await file.read()
+    if file.filename.lower().endswith(".txt"):
+        text = contents.decode("utf-8", errors="ignore")
+    elif file.filename.lower().endswith(".pdf"):
+        from PyPDF2 import PdfReader
+        reader = PdfReader(io.BytesIO(contents))
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported file type")
+
+    base_metadata = {"filename": file.filename}
+    # split into chunks
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=800, chunk_overlap=100)
+    chunks = splitter.split_text(text)
+
+    ids: List[str] = []
+    docs: List[str] = []
+    metas: List[Dict[str, Any]] = []
+    embs: List[List[float]] = []
+
+    for chunk in chunks:
+        chunk_meta = await _generate_metadata(chunk)
+        # merge with base metadata
+        merged = {**{k: str(v) for k, v in base_metadata.items()},
+                  **{k: str(v) for k, v in chunk_meta.items()}}
+        embedding = await _embed(chunk)
+        ids.append(str(uuid.uuid4()))
+        docs.append(chunk)
+        metas.append(merged)
+        embs.append(embedding)
+
+    collection = chroma_client.get_collection(name=collection_name)
+    collection.add(
+        ids=ids,
+        documents=docs,
+        metadatas=metas,
+        embeddings=embs
+    )
+    return {"status": "success", "metadata_count": len(ids)}
+
+
+@app.post("/upload/{collection_name}")
+async def upload_file(collection_name: str, request: Request, file: UploadFile = File(...)):
+    with tracing_context(parent=dict(request.headers)):
+        return await _process_upload(collection_name, file)
 
 
 @app.post("/embed/{collection_name}")
@@ -97,6 +170,8 @@ async def embed_generic(collection_name: str, payload: TextPayload, request: Req
             raise HTTPException(status_code=404, detail="Unknown collection")
 
         metadata = await _generate_metadata(payload.text)
+        if payload.source_metadata:
+            metadata.update(payload.source_metadata)
         vector = await _embed(payload.text)
 
         # Use client to add data
@@ -108,5 +183,3 @@ async def embed_generic(collection_name: str, payload: TextPayload, request: Req
             embeddings=[vector]
         )
         return {"status": "success", "metadata": metadata}
-
-# (Existing convenience wrappers /embed/documents, etc. would follow here)
